@@ -7,6 +7,7 @@ Example
 To run the script, type in a terminal:
 
     $ python test_multiagent.py --exp ./results/save-<env>-<num_drones>-<algo>-<obs>-<act>-<time_date>
+     python test_multiagent.py --exp ./results/save-leaderfollower-2-cc-kin-one_d_rpm-12.15.2022_03.04.42
 
 """
 import os
@@ -29,11 +30,11 @@ import ray
 from ray import tune
 from ray.tune import register_env
 from ray.rllib.agents import ppo
-from ray.rllib.agents.ppo import PPOTrainer, PPOTFPolicy
+from ray.rllib.agents.ppo import PPOTrainer
 from ray.rllib.examples.policy.random_policy import RandomPolicy
 from ray.rllib.utils.test_utils import check_learning_achieved
 from ray.rllib.models.torch.torch_modelv2 import TorchModelV2
-from ray.rllib.agents.callbacks import DefaultCallbacks
+from ray.rllib.algorithms.callbacks import DefaultCallbacks
 from ray.rllib.models.torch.fcnet import FullyConnectedNetwork
 from ray.rllib.models import ModelCatalog
 from ray.rllib.policy.sample_batch import SampleBatch
@@ -269,24 +270,24 @@ if __name__ == "__main__":
                                aggregate_phy_steps=shared_constants.AGGR_PHY_STEPS,
                                obs=OBS,
                                act=ACT,
-                               gui=True,
-                               record=False
+                               gui=False,
+                               record=True
                                )
     elif ARGS.exp.split("-")[1] == 'leaderfollower':
         test_env = LeaderFollowerAviary(num_drones=NUM_DRONES,
                                         aggregate_phy_steps=shared_constants.AGGR_PHY_STEPS,
                                         obs=OBS,
                                         act=ACT,
-                                        gui=True,
-                                        record=False
+                                        gui=False,
+                                        record=True
                                         )
     elif ARGS.exp.split("-")[1] == 'meetup':
         test_env = MeetupAviary(num_drones=NUM_DRONES,
                                 aggregate_phy_steps=shared_constants.AGGR_PHY_STEPS,
                                 obs=OBS,
                                 act=ACT,
-                                gui=True,
-                                record=False
+                                gui=False,
+                                record=True
                                 )
     else:
         print("[ERROR] environment not yet implemented")
@@ -297,6 +298,7 @@ if __name__ == "__main__":
     logger = Logger(logging_freq_hz=int(test_env.SIM_FREQ/test_env.AGGR_PHY_STEPS),
                     num_drones=NUM_DRONES
                     )
+    print("Logger made")
     if ACT in [ActionType.ONE_D_RPM, ActionType.ONE_D_DYN, ActionType.ONE_D_PID]:
         action = {i: np.array([0]) for i in range(NUM_DRONES)}
     elif ACT in [ActionType.RPM, ActionType.DYN, ActionType.VEL]:
@@ -313,6 +315,7 @@ if __name__ == "__main__":
         temp[0] = policy0.compute_single_action(np.hstack([action[1], obs[1], obs[0]])) # Counterintuitive order, check params.json
         temp[1] = policy1.compute_single_action(np.hstack([action[0], obs[0], obs[1]]))
         action = {0: temp[0][0], 1: temp[1][0]}
+        print("actions logged")
         obs, reward, done, info = test_env.step(action)
         test_env.render()
         if OBS==ObservationType.KIN: 

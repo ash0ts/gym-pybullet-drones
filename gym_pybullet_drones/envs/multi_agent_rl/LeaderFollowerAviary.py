@@ -21,7 +21,9 @@ class LeaderFollowerAviary(BaseMultiagentAviary):
                  gui=False,
                  record=False, 
                  obs: ObservationType=ObservationType.KIN,
-                 act: ActionType=ActionType.RPM):
+                 act: ActionType=ActionType.RPM,
+                 output_folder='results'
+                ):
         """Initialization of a multi-agent RL environment.
 
         Using the generic multi-agent RL superclass.
@@ -65,7 +67,8 @@ class LeaderFollowerAviary(BaseMultiagentAviary):
                          gui=gui,
                          record=record, 
                          obs=obs,
-                         act=act
+                         act=act,
+                         output_folder=output_folder
                          )
 
     ################################################################################

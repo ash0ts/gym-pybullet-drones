@@ -199,6 +199,7 @@ class Logger(object):
                 np.savetxt(out_file, np.transpose(np.vstack([t, (self.states[i, 14, :] - 4070.3) / 0.2685])), delimiter=",")
             with open(csv_dir+"/pwm3-"+str(i)+".csv", 'wb') as out_file:
                 np.savetxt(out_file, np.transpose(np.vstack([t, (self.states[i, 15, :] - 4070.3) / 0.2685])), delimiter=",")
+        return csv_dir
 
     ################################################################################
     
@@ -374,6 +375,8 @@ class Logger(object):
                             hspace=0.0
                             )
         if self.COLAB: 
-            plt.savefig(os.path.join('results', 'output_figure.png'))
+            plt.savefig(os.path.join(self.OUTPUT_FOLDER, 'output_figure.png'))
         else:
             plt.show()
+            
+        return fig
