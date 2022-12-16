@@ -48,7 +48,7 @@ from ray.rllib.models import ModelCatalog
 from ray.rllib.policy.sample_batch import SampleBatch
 from ray.rllib.env.multi_agent_env import ENV_STATE
 
-from ray.air.integrations.wandb import WandbLoggerCallback # 🪄🐝
+from ray.air.integrations.wandb import WandbLoggerCallback  # 🪄🐝
 import wandb
 
 from gym_pybullet_drones.utils.enums import DroneModel, Physics
@@ -61,8 +61,8 @@ from gym_pybullet_drones.utils.Logger import Logger
 import shared_constants
 from utils import video_recordings_to_wandb_table
 
-OWN_OBS_VEC_SIZE = None # Modified at runtime
-ACTION_VEC_SIZE = None # Modified at runtime
+OWN_OBS_VEC_SIZE = None  # Modified at runtime
+ACTION_VEC_SIZE = None  # Modified at runtime
 
 #### Useful links ##########################################
 # Workflow: github.com/ray-project/ray/blob/master/doc/source/rllib-training.rst
@@ -70,6 +70,8 @@ ACTION_VEC_SIZE = None # Modified at runtime
 # Competing policies example: github.com/ray-project/ray/blob/master/rllib/examples/rock_paper_scissors_multiagent.py
 
 ############################################################
+
+
 class CustomTorchCentralizedCriticModel(TorchModelV2, nn.Module):
     """Multi-agent model that implements a centralized value function.
 
@@ -84,22 +86,23 @@ class CustomTorchCentralizedCriticModel(TorchModelV2, nn.Module):
     """
 
     def __init__(self, obs_space, action_space, num_outputs, model_config, name):
-        TorchModelV2.__init__(self, obs_space, action_space, num_outputs, model_config, name)
+        TorchModelV2.__init__(self, obs_space, action_space,
+                              num_outputs, model_config, name)
         nn.Module.__init__(self)
         self.action_model = FullyConnectedNetwork(
-                                                  Box(low=-1, high=1, shape=(OWN_OBS_VEC_SIZE, )), 
-                                                  action_space,
-                                                  num_outputs,
-                                                  model_config,
-                                                  name + "_action"
-                                                  )
+            Box(low=-1, high=1, shape=(OWN_OBS_VEC_SIZE, )),
+            action_space,
+            num_outputs,
+            model_config,
+            name + "_action"
+        )
         self.value_model = FullyConnectedNetwork(
-                                                 obs_space, 
-                                                 action_space,
-                                                 1, 
-                                                 model_config, 
-                                                 name + "_vf"
-                                                 )
+            obs_space,
+            action_space,
+            1,
+            model_config,
+            name + "_vf"
+        )
         self._model_in = None
 
     def forward(self, input_dict, state, seq_lens):
@@ -107,79 +110,97 @@ class CustomTorchCentralizedCriticModel(TorchModelV2, nn.Module):
         return self.action_model({"obs": input_dict["obs"]["own_obs"]}, state, seq_lens)
 
     def value_function(self):
-        value_out, _ = self.value_model({"obs": self._model_in[0]}, self._model_in[1], self._model_in[2])
+        value_out, _ = self.value_model(
+            {"obs": self._model_in[0]}, self._model_in[1], self._model_in[2])
         return torch.reshape(value_out, [-1])
 
 ############################################################
+
+
 class FillInActions(DefaultCallbacks):
     def on_postprocess_trajectory(self, worker, episode, agent_id, policy_id, policies, postprocessed_batch, original_batches, **kwargs):
         to_update = postprocessed_batch[SampleBatch.CUR_OBS]
         other_id = 1 if agent_id == 0 else 0
-        action_encoder = ModelCatalog.get_preprocessor_for_space( 
-                                                                 # Box(-np.inf, np.inf, (ACTION_VEC_SIZE,), np.float32) # Unbounded
-                                                                 Box(-1, 1, (ACTION_VEC_SIZE,), np.float32) # Bounded
-                                                                 )
+        action_encoder = ModelCatalog.get_preprocessor_for_space(
+            # Box(-np.inf, np.inf, (ACTION_VEC_SIZE,), np.float32) # Unbounded
+            Box(-1, 1, (ACTION_VEC_SIZE,), np.float32)  # Bounded
+        )
         _, opponent_batch = original_batches[other_id]
         # opponent_actions = np.array([action_encoder.transform(a) for a in opponent_batch[SampleBatch.ACTIONS]]) # Unbounded
-        opponent_actions = np.array([action_encoder.transform(np.clip(a, -1, 1)) for a in opponent_batch[SampleBatch.ACTIONS]]) # Bounded
+        opponent_actions = np.array([action_encoder.transform(
+            np.clip(a, -1, 1)) for a in opponent_batch[SampleBatch.ACTIONS]])  # Bounded
         to_update[:, -ACTION_VEC_SIZE:] = opponent_actions
-    
+
 # class ModelEvaluationCallback(DefaultCallbacks):
 #     # def __init__(self):
-#         # self.logger = 
-    
-    
-        
+#         # self.logger =
+
+
 ############################################################
 def central_critic_observer(agent_obs, **kw):
     new_obs = {
         0: {
             "own_obs": agent_obs[0],
             "opponent_obs": agent_obs[1],
-            "opponent_action": np.zeros(ACTION_VEC_SIZE), # Filled in by FillInActions
+            # Filled in by FillInActions
+            "opponent_action": np.zeros(ACTION_VEC_SIZE),
         },
         1: {
             "own_obs": agent_obs[1],
             "opponent_obs": agent_obs[0],
-            "opponent_action": np.zeros(ACTION_VEC_SIZE), # Filled in by FillInActions
+            # Filled in by FillInActions
+            "opponent_action": np.zeros(ACTION_VEC_SIZE),
         },
     }
     return new_obs
+
 
 ############################################################
 if __name__ == "__main__":
 
     #### Define and parse (optional) arguments for the script ##
-    parser = argparse.ArgumentParser(description='Multi-agent reinforcement learning experiments script')
-    parser.add_argument('--num_drones',  default=5,                 type=int,                                                                 help='Number of drones (default: 2)', metavar='')
-    parser.add_argument('--env',         default='leaderfollower',  type=str,             choices=['leaderfollower', 'flock', 'meetup'],      help='Task (default: leaderfollower)', metavar='')
-    parser.add_argument('--obs',         default='kin',             type=ObservationType,                                                     help='Observation space (default: kin)', metavar='')
-    parser.add_argument('--act',         default='one_d_rpm',       type=ActionType,                                                          help='Action space (default: one_d_rpm)', metavar='')
-    parser.add_argument('--algo',        default='cc',              type=str,             choices=['cc'],                                     help='MARL approach (default: cc)', metavar='')
-    parser.add_argument('--workers',     default=0,                 type=int,                                                                 help='Number of RLlib workers (default: 0)', metavar='')       
-    parser.add_argument('--record',      default=True,              type=bool,                                                                help='Save screenshots of training (default: True)', metavar='')
+    parser = argparse.ArgumentParser(
+        description='Multi-agent reinforcement learning experiments script')
+    parser.add_argument('--num_drones',  default=5,                 type=int,
+                        help='Number of drones (default: 2)', metavar='')
+    parser.add_argument('--env',         default='leaderfollower',  type=str,             choices=[
+                        'leaderfollower', 'flock', 'meetup'],      help='Task (default: leaderfollower)', metavar='')
+    parser.add_argument('--obs',         default='kin',             type=ObservationType,
+                        help='Observation space (default: kin)', metavar='')
+    parser.add_argument('--act',         default='one_d_rpm',       type=ActionType,
+                        help='Action space (default: one_d_rpm)', metavar='')
+    parser.add_argument('--algo',        default='cc',              type=str,             choices=[
+                        'cc'],                                     help='MARL approach (default: cc)', metavar='')
+    parser.add_argument('--workers',     default=0,                 type=int,
+                        help='Number of RLlib workers (default: 0)', metavar='')
+    parser.add_argument('--record',      default=True,              type=bool,
+                        help='Save screenshots of training (default: True)', metavar='')
     ARGS = parser.parse_args()
 
     #### Save directory ########################################
     output_folder = PROJECT_NAME = "multiagent-drone-pybullet-rllib"
-    exp = ARGS.env+'-'+str(ARGS.num_drones)+'-'+ARGS.algo+'-'+ARGS.obs.value+'-'+ARGS.act.value
-    
-    filename = os.path.dirname(os.path.abspath(__file__))+f'/{output_folder}/results-'+exp+'-'+datetime.now().strftime("%m.%d.%Y_%H.%M.%S")
+    exp = ARGS.env+'-'+str(ARGS.num_drones)+'-'+ARGS.algo + \
+        '-'+ARGS.obs.value+'-'+ARGS.act.value
+
+    filename = os.path.dirname(os.path.abspath(
+        __file__))+f'/{output_folder}/results-'+exp+'-'+datetime.now().strftime("%m.%d.%Y_%H.%M.%S")
     if not os.path.exists(filename):
         os.makedirs(filename+'/')
-    
-    videos_folder = os.path.dirname(os.path.abspath(__file__))+f'/{output_folder}/videos-'+exp+'-'+datetime.now().strftime("%m.%d.%Y_%H.%M.%S")
+
+    videos_folder = os.path.dirname(os.path.abspath(
+        __file__))+f'/{output_folder}/videos-'+exp+'-'+datetime.now().strftime("%m.%d.%Y_%H.%M.%S")
     if not os.path.exists(videos_folder):
         os.makedirs(videos_folder+'/')
-        
-    eval_folder =  os.path.dirname(os.path.abspath(__file__))+f'/{output_folder}/eval-'+exp+'-'+datetime.now().strftime("%m.%d.%Y_%H.%M.%S")
+
+    eval_folder = os.path.dirname(os.path.abspath(
+        __file__))+f'/{output_folder}/eval-'+exp+'-'+datetime.now().strftime("%m.%d.%Y_%H.%M.%S")
     if not os.path.exists(eval_folder):
         os.makedirs(eval_folder+'/')
-        
+
     eval_videos = f"{eval_folder}/videos"
     if not os.path.exists(eval_videos):
         os.makedirs(eval_videos+'/')
-        
+
     eval_logs = f"{eval_folder}/logs"
     if not os.path.exists(eval_logs):
         os.makedirs(eval_logs+'/')
@@ -191,9 +212,9 @@ if __name__ == "__main__":
     #         f.write(str(git_commit))
 
     #### Constants, and errors #################################
-    if ARGS.obs==ObservationType.KIN:
+    if ARGS.obs == ObservationType.KIN:
         OWN_OBS_VEC_SIZE = 12
-    elif ARGS.obs==ObservationType.RGB:
+    elif ARGS.obs == ObservationType.RGB:
         print("[ERROR] ObservationType.RGB for multi-agent systems not yet implemented")
         exit()
     else:
@@ -217,7 +238,8 @@ if __name__ == "__main__":
     ray.init(ignore_reinit_error=True)
 
     #### Register the custom centralized critic model ##########
-    ModelCatalog.register_custom_model("cc_model", CustomTorchCentralizedCriticModel)
+    ModelCatalog.register_custom_model(
+        "cc_model", CustomTorchCentralizedCriticModel)
 
     #### Register the environment ##############################
     temp_env_name = "this-aviary-v0"
@@ -227,7 +249,7 @@ if __name__ == "__main__":
                                                           obs=ARGS.obs,
                                                           act=ARGS.act,
                                                           record=ARGS.record,
-                                                          output_folder = videos_folder
+                                                          output_folder=videos_folder
                                                           )
                      )
     elif ARGS.env == 'leaderfollower':
@@ -236,7 +258,7 @@ if __name__ == "__main__":
                                                                    obs=ARGS.obs,
                                                                    act=ARGS.act,
                                                                    record=ARGS.record,
-                                                                   output_folder = videos_folder
+                                                                   output_folder=videos_folder
                                                                    )
                      )
     elif ARGS.env == 'meetup':
@@ -245,7 +267,7 @@ if __name__ == "__main__":
                                                            obs=ARGS.obs,
                                                            act=ARGS.act,
                                                            record=ARGS.record,
-                                                           output_folder = videos_folder
+                                                           output_folder=videos_folder
                                                            )
                      )
     else:
@@ -259,7 +281,7 @@ if __name__ == "__main__":
                                obs=ARGS.obs,
                                act=ARGS.act,
                                record=ARGS.record,
-                               output_folder = videos_folder
+                               output_folder=videos_folder
                                )
     elif ARGS.env == 'leaderfollower':
         temp_env = LeaderFollowerAviary(num_drones=ARGS.num_drones,
@@ -267,7 +289,7 @@ if __name__ == "__main__":
                                         obs=ARGS.obs,
                                         act=ARGS.act,
                                         record=ARGS.record,
-                                        output_folder = videos_folder
+                                        output_folder=videos_folder
                                         )
     elif ARGS.env == 'meetup':
         temp_env = MeetupAviary(num_drones=ARGS.num_drones,
@@ -275,7 +297,7 @@ if __name__ == "__main__":
                                 obs=ARGS.obs,
                                 act=ARGS.act,
                                 record=ARGS.record,
-                                output_folder = videos_folder
+                                output_folder=videos_folder
                                 )
     else:
         print("[ERROR] environment not yet implemented")
@@ -295,12 +317,13 @@ if __name__ == "__main__":
     # you can defer environment initialization until ``reset()`` is called
 
     #### Set up the trainer's config ###########################
-    config = ppo.DEFAULT_CONFIG.copy() # For the default config, see github.com/ray-project/ray/blob/master/rllib/agents/trainer.py
+    # For the default config, see github.com/ray-project/ray/blob/master/rllib/agents/trainer.py
+    config = ppo.DEFAULT_CONFIG.copy()
     config = {
         "env": temp_env_name,
         # "num_workers": 0 + ARGS.workers,
         "num_workers": 3,
-        "num_gpus": 1, # Use GPUs iff `RLLIB_NUM_GPUS` env var set to > 0
+        "num_gpus": 1,  # Use GPUs iff `RLLIB_NUM_GPUS` env var set to > 0
         # "num_gpus": int(os.environ.get("RLLIB_NUM_GPUS", "0")), # Use GPUs iff `RLLIB_NUM_GPUS` env var set to > 0
         "batch_mode": "complete_episodes",
         "callbacks": FillInActions,
@@ -308,31 +331,33 @@ if __name__ == "__main__":
     }
 
     #### Set up the model parameters of the trainer's config ###
-    config["model"] = { 
+    config["model"] = {
         "custom_model": "cc_model",
     }
-    
+
     #### Set up the multiagent params of the trainer's config ##
-    config["multiagent"] = { 
+    config["multiagent"] = {
         "policies": {
-            "pol0": (None, observer_space, action_space, {"agent_id": 0,}),
-            "pol1": (None, observer_space, action_space, {"agent_id": 1,}),
+            "pol0": (None, observer_space, action_space, {"agent_id": 0, }),
+            "pol1": (None, observer_space, action_space, {"agent_id": 1, }),
         },
-        "policy_mapping_fn": lambda x: "pol0" if x == 0 else "pol1", # # Function mapping agent ids to policy ids
-        "observation_fn": central_critic_observer, # See rllib/evaluation/observation_function.py for more info
+        # Function mapping agent ids to policy ids
+        "policy_mapping_fn": lambda x: "pol0" if x == 0 else "pol1",
+        # See rllib/evaluation/observation_function.py for more info
+        "observation_fn": central_critic_observer,
     }
-    
+
     #### Tuner Callbacks #######################################
     tuner_callbacks = [
         WandbLoggerCallback(project=f"{PROJECT_NAME}-trials",
                             save_checkpoints=True,
                             # log_config=True
-                           )
+                            )
     ]
 
     #### Ray Tune stopping conditions ##########################
     stop = {
-        "timesteps_total": 5, # 100000 ~= 10'
+        "timesteps_total": 5,  # 100000 ~= 10'
         # "episode_reward_mean": 0,
         # "training_iteration": 0,
     }
@@ -350,17 +375,18 @@ if __name__ == "__main__":
     # check_learning_achieved(results, 1.0)
 
     #### Save agent ############################################
-    run = wandb.init(project = PROJECT_NAME, name=f"eval-{exp}", config=config)
+    run = wandb.init(project=PROJECT_NAME, name=f"eval-{exp}", config=config)
     best_model_artifact = wandb.Artifact(exp, type="model")
-    
-    #Grab all the logged videos during training and log them during eval
-    #TODO: On episode end of training log the video as opposed to after the fact
-    training_video_table = video_recordings_to_wandb_table(videos_folder, fr=15)
+
+    # Grab all the logged videos during training and log them during eval
+    # TODO: On episode end of training log the video as opposed to after the fact
+    training_video_table = video_recordings_to_wandb_table(
+        videos_folder, fr=15)
     run.log({
         "training_videos": training_video_table
     })
     best_model_artifact.add(training_video_table, "training_videos")
-    
+
     checkpoints = results.get_trial_checkpoints_paths(trial=results.get_best_trial('episode_reward_mean',
                                                                                    mode='max'
                                                                                    ),
@@ -368,7 +394,7 @@ if __name__ == "__main__":
                                                       )
     best_checkpoint_path = checkpoints[0][0]
     best_model_artifact.add_dir(best_checkpoint_path, name="model")
-        
+
     #### Run best model in test environment ####################
     agent = ppo.PPOTrainer(config=config)
     agent.restore(best_checkpoint_path)
@@ -384,11 +410,11 @@ if __name__ == "__main__":
     #### Create test environment ###############################
     if ARGS.env == 'flock':
         test_env = FlockAviary(num_drones=ARGS.num_drones,
-                                        aggregate_phy_steps=shared_constants.AGGR_PHY_STEPS,
-                                        obs=ARGS.obs,
-                                        act=ARGS.act,
-                                        record=ARGS.record,
-                                        output_folder = eval_videos
+                               aggregate_phy_steps=shared_constants.AGGR_PHY_STEPS,
+                               obs=ARGS.obs,
+                               act=ARGS.act,
+                               record=ARGS.record,
+                               output_folder=eval_videos
                                )
     elif ARGS.env == 'leaderfollower':
         test_env = LeaderFollowerAviary(num_drones=ARGS.num_drones,
@@ -396,20 +422,20 @@ if __name__ == "__main__":
                                         obs=ARGS.obs,
                                         act=ARGS.act,
                                         record=ARGS.record,
-                                        output_folder = eval_videos
+                                        output_folder=eval_videos
                                         )
     elif ARGS.env == 'meetup':
         test_env = MeetupAviary(num_drones=ARGS.num_drones,
-                                        aggregate_phy_steps=shared_constants.AGGR_PHY_STEPS,
-                                        obs=ARGS.obs,
-                                        act=ARGS.act,
-                                        record=ARGS.record,
-                                        output_folder = eval_videos
+                                aggregate_phy_steps=shared_constants.AGGR_PHY_STEPS,
+                                obs=ARGS.obs,
+                                act=ARGS.act,
+                                record=ARGS.record,
+                                output_folder=eval_videos
                                 )
     else:
         print("[ERROR] environment not yet implemented")
         exit()
-    
+
     #### Show, record a video, and log the model's performance #
     obs = test_env.reset()
     logger = Logger(logging_freq_hz=int(test_env.SIM_FREQ/test_env.AGGR_PHY_STEPS),
@@ -421,38 +447,42 @@ if __name__ == "__main__":
         action = {i: np.array([0]) for i in range(ARGS.num_drones)}
     elif ARGS.act in [ActionType.RPM, ActionType.DYN, ActionType.VEL]:
         action = {i: np.array([0, 0, 0, 0]) for i in range(ARGS.num_drones)}
-    elif ARGS.act==ActionType.PID:
-         action = {i: np.array([0, 0, 0]) for i in range(ARGS.num_drones)}
+    elif ARGS.act == ActionType.PID:
+        action = {i: np.array([0, 0, 0]) for i in range(ARGS.num_drones)}
     else:
         print("[ERROR] unknown ActionType")
         exit()
     start = time.time()
-    for i in range(6*int(test_env.SIM_FREQ/test_env.AGGR_PHY_STEPS)): # Up to 6''
+    for i in range(6*int(test_env.SIM_FREQ/test_env.AGGR_PHY_STEPS)):  # Up to 6''
         #### Deploy the policies ###################################
         temp = {}
-        temp[0] = policy0.compute_single_action(np.hstack([action[1], obs[1], obs[0]])) # Counterintuitive order, check params.json
-        temp[1] = policy1.compute_single_action(np.hstack([action[0], obs[0], obs[1]]))
+        # Counterintuitive order, check params.json
+        temp[0] = policy0.compute_single_action(
+            np.hstack([action[1], obs[1], obs[0]]))
+        temp[1] = policy1.compute_single_action(
+            np.hstack([action[0], obs[0], obs[1]]))
         action = {0: temp[0][0], 1: temp[1][0]}
         obs, reward, done, info = test_env.step(action)
         test_env.render()
         print("~~~~~~~~~~~~~~~~~")
         print(len(obs))
         print(len(action))
-        if ARGS.obs==ObservationType.KIN: 
+        if ARGS.obs == ObservationType.KIN:
             for j in range(ARGS.num_drones):
                 logger.log(drone=j,
                            timestamp=i/test_env.SIM_FREQ,
-                           state= np.hstack([obs[j][0:3], np.zeros(4), obs[j][3:15], np.resize(action[j], (4))]),
+                           state=np.hstack([obs[j][0:3], np.zeros(
+                               4), obs[j][3:15], np.resize(action[j], (4))]),
                            control=np.zeros(12)
                            )
         # sync(np.floor(i*test_env.AGGR_PHY_STEPS), start, test_env.TIMESTEP)
         # if done["__all__"]: obs = test_env.reset() # OPTIONAL EPISODE HALT
     test_env.close()
-    
+
     #Use the logger to output results of evaluation and log them to W&B#
     csv_dir = logger.save_as_csv("ma")
     fig = logger.plot()
-    
+
     best_model_artifact.add_dir(csv_dir, name="logs")
     output_figure = wandb.Plotly(fig)
     eval_video_table = video_recordings_to_wandb_table(eval_videos, fr=15)
@@ -461,10 +491,8 @@ if __name__ == "__main__":
         "eval_logs": output_figure
     })
     best_model_artifact.add(eval_video_table, "eval_videos")
-    
+
     run.log_artifact(best_model_artifact)
-    
-    
 
     #### Shut down Ray #########################################
     ray.shutdown()
