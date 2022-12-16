@@ -36,7 +36,7 @@ gpustat==1.0.0
 GPUtil==1.4.0
 grpcio==1.51.1
 gym==0.21.0
--e git+https://github.com/ash0ts/gym-pybullet-drones.git@7f930179ad9691229dbe4a4af53c4fea6e7db1fd#egg=gym_pybullet_drones
+-e git+https://github.com/ash0ts/gym-pybullet-drones.git
 h11==0.14.0
 idna==3.4
 imageio==2.22.4
