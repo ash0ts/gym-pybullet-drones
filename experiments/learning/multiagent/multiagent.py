@@ -201,12 +201,6 @@ if __name__ == "__main__":
         AlgorithmConfig(algo_class=algorithm)
         .environment(temp_env_name)
         .framework("torch")
-        .rollouts(
-            num_rollout_workers=num_rollout_workers,
-            # num_envs_per_worker=4,
-            rollout_fragment_length="auto",
-            batch_mode="complete_episodes"
-        )
         .training(
             train_batch_size=train_batch_size,
             # gamma=0.9,
@@ -238,6 +232,13 @@ if __name__ == "__main__":
                    # num_gpus_per_worker=num_gpus_per_worker,
                   num_cpus_per_worker=num_cpus_per_worker
                   )
+        .rollouts(
+            num_rollout_workers=num_rollout_workers,
+            # num_envs_per_worker=4,
+            rollout_fragment_length="auto",
+            batch_mode="complete_episodes"
+        )
+        
     )
     print(f"Created {algorithm} config")
     #### Tuner Callbacks #######################################
@@ -257,7 +258,10 @@ if __name__ == "__main__":
             )
     
     #### Ray Tune stopping conditions ##########################
-    stop = TrialPlateauStopper(metric="episode_reward_mean")
+    stop = CombinedStopper(
+        MaximumIterationStopper(max_iter=500),
+        TrialPlateauStopper(metric="episode_reward_mean")
+    )
     
     #### Train #################################################
     #TODO: Add a tunable parameter on SEED
