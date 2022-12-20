@@ -16,7 +16,9 @@ import random
 # Competing policies example: github.com/ray-project/ray/blob/master/rllib/examples/rock_paper_scissors_multiagent.py
 
 ############################################################
-
+#https://github.com/ray-project/ray/blob/master/rllib/examples/models/centralized_critic_models.py
+#https://github.com/ray-project/ray/blob/master/rllib/examples/centralized_critic.py
+#https://github.com/ray-project/ray/blob/master/rllib/examples/centralized_critic_2.py
 class CustomTorchCentralizedCriticModel(TorchModelV2, nn.Module):
     """Multi-agent model that implements a centralized value function.
 

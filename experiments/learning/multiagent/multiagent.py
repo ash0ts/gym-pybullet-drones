@@ -218,8 +218,8 @@ if __name__ == "__main__":
         )
         .multi_agent(
             policies={
-                "pol0": (None, observer_space, action_space, {"agent_id": 0, }),
-                "pol1": (None, observer_space, action_space, {"agent_id": 1, }),
+                "pol0": (None, observer_space, action_space, {}),
+                "pol1": (None, observer_space, action_space, {}),
             },
             policy_mapping_fn=(
                 lambda agent_id, episode, worker, **kw: (
