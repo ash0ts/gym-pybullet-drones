@@ -33,6 +33,8 @@ from gym.utils import seeding
 import torch
 import ray
 from ray import air, tune
+from ray.tune.stopper import (CombinedStopper,
+    MaximumIterationStopper, TrialPlateauStopper)
 from ray.tune.logger import DEFAULT_LOGGERS
 from ray.tune import register_env
 from ray.rllib.agents import ppo
@@ -43,7 +45,8 @@ from ray.rllib.env.multi_agent_env import ENV_STATE
 from ray.rllib.models import ModelCatalog
 from ray.rllib.algorithms.algorithm_config import AlgorithmConfig
 from gym.spaces import Box, Dict
-
+from ray.rllib.algorithms.callbacks import DefaultCallbacks
+from ray.rllib.policy.sample_batch import SampleBatch
 
 from ray.air.integrations.wandb import WandbLoggerCallback  # 🪄🐝
 import wandb
@@ -54,16 +57,18 @@ from gym_pybullet_drones.envs.single_agent_rl.BaseSingleAgentAviary import Actio
 from gym_pybullet_drones.utils.Logger import Logger
 
 from utils import video_recordings_to_wandb_table, configure_and_create_folders
-from model import CustomTorchCentralizedCriticModel, central_critic_observer, FillInActions, configure_constants
+from model import CustomTorchCentralizedCriticModel, configure_constants
 from env_manager import create_env
 
+import multiprocessing
+
+SEED = 1
 ############################################################
 if __name__ == "__main__":
-
     #### Define and parse (optional) arguments for the script ##
     parser = argparse.ArgumentParser(
         description='Multi-agent reinforcement learning experiments script')
-    parser.add_argument('--num_drones',  default=5,                 type=int,
+    parser.add_argument('--num_drones',  default=2,                 type=int,
                         help='Number of drones (default: 2)', metavar='')
     parser.add_argument('--env',         default='leaderfollower',  type=str,             choices=[
                         'leaderfollower', 'flock', 'meetup'],      help='Task (default: leaderfollower)', metavar='')
@@ -83,12 +88,46 @@ if __name__ == "__main__":
     output_folder = PROJECT_NAME = "multiagent-drone-pybullet-rllib"
     exp, filename, videos_folder, eval_folder, eval_videos, eval_logs = configure_and_create_folders(
         output_folder, ARGS)
+    print("Configured folders")
 
     #### Constants, and errors #################################
-    configure_constants(ARGS)
+    OWN_OBS_VEC_SIZE, ACTION_VEC_SIZE = configure_constants(ARGS)
+    
+    ####
+    #TODO: Move to model.py
+    #BUG:  OWN_OBS_VEC_SIZE, ACTION_VEC_SIZE global variables not properly being accessed after being modified
+    ######DEFINE ADDITIONAL MODEL STATE INFO########################
+    class FillInActions(DefaultCallbacks):
+        def on_postprocess_trajectory(self, worker, episode, agent_id, policy_id, policies, postprocessed_batch, original_batches, **kwargs):
+            to_update = postprocessed_batch[SampleBatch.CUR_OBS]
+            other_id = 1 if agent_id == 0 else 0
+            action_encoder = ModelCatalog.get_preprocessor_for_space(
+                # Box(-np.inf, np.inf, (ACTION_VEC_SIZE,), np.float32) # Unbounded
+                Box(-1, 1, (ACTION_VEC_SIZE,), np.float32)  # Bounded
+            )
+            _, opponent_batch = original_batches[other_id]
+            # opponent_actions = np.array([action_encoder.transform(a) for a in opponent_batch[SampleBatch.ACTIONS]]) # Unbounded
+            opponent_actions = np.array([action_encoder.transform(
+                np.clip(a, -1, 1)) for a in opponent_batch[SampleBatch.ACTIONS]])  # Bounded
+            to_update[:, -ACTION_VEC_SIZE:] = opponent_actions
 
-    #### Uncomment to debug slurm scripts ######################
-    # exit()
+    ############################################################
+    def central_critic_observer(agent_obs, **kw):
+        new_obs = {
+            0: {
+                "own_obs": agent_obs[0],
+                "opponent_obs": agent_obs[1],
+                # Filled in by FillInActions
+                "opponent_action": np.zeros(ACTION_VEC_SIZE),
+            },
+            1: {
+                "own_obs": agent_obs[1],
+                "opponent_obs": agent_obs[0],
+                # Filled in by FillInActions
+                "opponent_action": np.zeros(ACTION_VEC_SIZE),
+            },
+        }
+        return new_obs
 
     #### Initialize Ray Tune ###################################
     ray.shutdown()
@@ -97,13 +136,14 @@ if __name__ == "__main__":
     #### Register the custom centralized critic model ##########
     ModelCatalog.register_custom_model(
         "cc_model", CustomTorchCentralizedCriticModel)
+    print("Registered model")
 
     #### Register the environment ##############################
     temp_env_name = "this-aviary-v0"
     register_env(temp_env_name, lambda _: create_env(videos_folder, ARGS))
     temp_env = create_env(videos_folder, ARGS)
+    print("Registered environment")
     #### Unused env to extract the act and obs spaces ##########
-
     observer_space = Dict({
         "own_obs": temp_env.observation_space[0],
         "opponent_obs": temp_env.observation_space[0],
@@ -119,22 +159,64 @@ if __name__ == "__main__":
     # you can defer environment initialization until ``reset()`` is called
 
     #### Set up the trainer's config ###########################
+    
+    
+    # 🔦+🔎 Get all your useful hardware information
+    use_gpu = torch.cuda.is_available()
+    num_cpus = multiprocessing.cpu_count()
+
+    # 🧮 Do some quick math to efficiently spread the workload to each GPU
+    if use_gpu:
+        num_gpus = torch.cuda.device_count()
+        num_rollout_workers = 4 if num_gpus>=4 else num_gpus
+        num_gpus_per_worker = num_gpus // num_rollout_workers
+        num_cpus_per_worker = 4 * num_gpus_per_worker #Assumes 4 cpus per gpu
+    else:
+        num_gpus = 0
+        num_gpus_per_worker = 0
+        num_cpus_per_worker = 4
+        num_rollout_workers = num_cpus // num_cpus_per_worker
+    
+    #TODO: Make arguments
     algorithm = "PPO"
+    train_batch_size = 128
+    num_gpus = 2
+    #TODO: Gets stuck on PENDING if resource starved
+    num_rollout_workers = 1
+    num_gpus_per_worker = 1
+    num_cpus_per_worker = (num_cpus//num_rollout_workers) - 1
+    
+    
+    print(f"""
+    {num_cpus}
+    {num_gpus}
+    {num_rollout_workers}
+    {num_gpus_per_worker}
+    {num_cpus_per_worker}
+    """
+    )
+
+    
     config = (
         AlgorithmConfig(algo_class=algorithm)
         .environment(temp_env_name)
         .framework("torch")
         .rollouts(
-            num_rollout_workers=3,
+            num_rollout_workers=num_rollout_workers,
             # num_envs_per_worker=4,
-            rollout_fragment_length=10,
+            rollout_fragment_length="auto",
             batch_mode="complete_episodes"
         )
         .training(
-            # train_batch_size=200,
+            train_batch_size=train_batch_size,
             # gamma=0.9,
             model={
                 "custom_model": "cc_model",
+                "custom_model_config": {
+                    "OWN_OBS_VEC_SIZE" : OWN_OBS_VEC_SIZE,
+                    "ACTION_VEC_SIZE" : ACTION_VEC_SIZE,
+                    "SEED": SEED
+                }
             }
         )
         .callbacks(
@@ -145,11 +227,19 @@ if __name__ == "__main__":
                 "pol0": (None, observer_space, action_space, {"agent_id": 0, }),
                 "pol1": (None, observer_space, action_space, {"agent_id": 1, }),
             },
-            policy_mapping_fn=lambda x: "pol0" if x == 0 else "pol1",
+            policy_mapping_fn=(
+                lambda agent_id, episode, worker, **kw: (
+                    "pol0" if agent_id == 0 else "pol1"
+                )
+            ),
             observation_fn=central_critic_observer,
-        )
-        .resources(num_gpus=int(os.environ.get("RLLIB_NUM_GPUS", "1")))
+            )
+        .resources(num_gpus=num_gpus,
+                   # num_gpus_per_worker=num_gpus_per_worker,
+                  num_cpus_per_worker=num_cpus_per_worker
+                  )
     )
+    print(f"Created {algorithm} config")
     #### Tuner Callbacks #######################################
     tuner_callbacks = [
         WandbLoggerCallback(project=f"{PROJECT_NAME}-trials",
@@ -157,29 +247,31 @@ if __name__ == "__main__":
                             log_config=True
                             )
     ]
-
+    
+    ### Tuner Checkpoint settings ####################################
+    checkpoint_config = air.CheckpointConfig(
+                # We'll keep the best five checkpoints at all times
+                # checkpoints (by episode_reward_mean, reported by the trainable, descending)
+                checkpoint_score_attribute="episode_reward_mean",
+                num_to_keep=3,
+            )
+    
     #### Ray Tune stopping conditions ##########################
-    stop = {
-        "timesteps_total": 5,  # 100000 ~= 10'
-        # "episode_reward_mean": 0,
-        # "training_iteration": 0,
-    }
-
+    stop = TrialPlateauStopper(metric="episode_reward_mean")
+    
     #### Train #################################################
+    #TODO: Add a tunable parameter on SEED
     model_tuner = tune.Tuner(
         algorithm, param_space=config, run_config=air.RunConfig(
             verbose=3, local_dir=filename,
             stop=stop,
             callbacks=tuner_callbacks,
-            checkpoint_config=air.CheckpointConfig(
-                # We'll keep the best five checkpoints at all times
-                # checkpoints (by episode_reward_mean, reported by the trainable, descending)
-                checkpoint_score_attribute="episode_reward_mean",
-                num_to_keep=3,
-            ))
+            checkpoint_config=checkpoint_config)
     )
+    print("Created model tuner")
 
-    results = model_tuner.fit()
+    results_grid = model_tuner.fit()
+    print("Trained model")
     # check_learning_achieved(results, 1.0)
 
     #### Save agent ############################################
@@ -193,8 +285,10 @@ if __name__ == "__main__":
     run.log({
         "training_videos": training_video_table
     })
+    print("Logged training videos")
     best_model_artifact.add(training_video_table, "training_videos")
-
+    
+    results = results_grid._experiment_analysis #TODO: Perform this logic directly with the tuner.ResultGrid as opposed to ExperimentAnalysis
     checkpoints = results.get_trial_checkpoints_paths(trial=results.get_best_trial('episode_reward_mean',
                                                                                    mode='max'
                                                                                    ),
@@ -206,6 +300,7 @@ if __name__ == "__main__":
     #### Run best model in test environment ####################
     agent = ppo.PPOTrainer(config=config)
     agent.restore(best_checkpoint_path)
+    print(f"Restored best model from {best_checkpoint_path}")
 
     #### Extract and print policies ############################
     policy0 = agent.get_policy("pol0")
@@ -217,6 +312,7 @@ if __name__ == "__main__":
 
     #### Create test environment ###############################
     test_env = create_env(eval_videos, ARGS)
+    print("Created test environment")
 
     #### Show, record a video, and log the model's performance #
     obs = test_env.reset()
@@ -246,9 +342,6 @@ if __name__ == "__main__":
         action = {0: temp[0][0], 1: temp[1][0]}
         obs, reward, done, info = test_env.step(action)
         test_env.render()
-        print("~~~~~~~~~~~~~~~~~")
-        print(len(obs))
-        print(len(action))
         if ARGS.obs == ObservationType.KIN:
             for j in range(ARGS.num_drones):
                 logger.log(drone=j,
@@ -272,10 +365,13 @@ if __name__ == "__main__":
         "eval_videos": eval_video_table,
         "eval_logs": output_figure
     })
+    print("Logged evaluation details")
     best_model_artifact.add(eval_video_table, "eval_videos")
 
     run.log_artifact(best_model_artifact)
+    print("Logged all details to model artifact")
 
     #### Shut down Ray #########################################
     ray.shutdown()
     run.finish()
+    print("Finished!")

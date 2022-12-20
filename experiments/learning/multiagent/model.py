@@ -8,10 +8,7 @@ from ray.rllib.policy.sample_batch import SampleBatch
 from ray.rllib.models import ModelCatalog
 import numpy as np
 from gym_pybullet_drones.envs.single_agent_rl.BaseSingleAgentAviary import ActionType, ObservationType
-
-
-OWN_OBS_VEC_SIZE = None  # Modified at runtime
-ACTION_VEC_SIZE = None  # Modified at runtime
+import random
 
 #### Useful links ##########################################
 # Workflow: github.com/ray-project/ray/blob/master/doc/source/rllib-training.rst
@@ -19,7 +16,6 @@ ACTION_VEC_SIZE = None  # Modified at runtime
 # Competing policies example: github.com/ray-project/ray/blob/master/rllib/examples/rock_paper_scissors_multiagent.py
 
 ############################################################
-
 
 class CustomTorchCentralizedCriticModel(TorchModelV2, nn.Module):
     """Multi-agent model that implements a centralized value function.
@@ -33,25 +29,33 @@ class CustomTorchCentralizedCriticModel(TorchModelV2, nn.Module):
     - A value model that also looks at the 'opponent_obs' / 'opponent_action'
       to compute the value (it does this by using the 'obs_flat' tensor).
     """
+    
 
-    def __init__(self, obs_space, action_space, num_outputs, model_config, name):
+    #TODO: Make this GPU compatible
+    def __init__(self, obs_space, action_space, num_outputs, model_config, name, OWN_OBS_VEC_SIZE, ACTION_VEC_SIZE, SEED):
+        random.seed(SEED)
+        np.random.seed(SEED)
+        torch.manual_seed(SEED)
+        
         TorchModelV2.__init__(self, obs_space, action_space,
                               num_outputs, model_config, name)
         nn.Module.__init__(self)
+        
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.action_model = FullyConnectedNetwork(
             Box(low=-1, high=1, shape=(OWN_OBS_VEC_SIZE, )),
             action_space,
             num_outputs,
             model_config,
             name + "_action"
-        )
+        )#.to(self.device)
         self.value_model = FullyConnectedNetwork(
             obs_space,
             action_space,
             1,
             model_config,
             name + "_vf"
-        )
+        )#.to(self.device)
         self._model_in = None
 
     def forward(self, input_dict, state, seq_lens):
@@ -63,49 +67,8 @@ class CustomTorchCentralizedCriticModel(TorchModelV2, nn.Module):
             {"obs": self._model_in[0]}, self._model_in[1], self._model_in[2])
         return torch.reshape(value_out, [-1])
 
-############################################################
-
-
-class FillInActions(DefaultCallbacks):
-    def on_postprocess_trajectory(self, worker, episode, agent_id, policy_id, policies, postprocessed_batch, original_batches, **kwargs):
-        to_update = postprocessed_batch[SampleBatch.CUR_OBS]
-        other_id = 1 if agent_id == 0 else 0
-        action_encoder = ModelCatalog.get_preprocessor_for_space(
-            # Box(-np.inf, np.inf, (ACTION_VEC_SIZE,), np.float32) # Unbounded
-            Box(-1, 1, (ACTION_VEC_SIZE,), np.float32)  # Bounded
-        )
-        _, opponent_batch = original_batches[other_id]
-        # opponent_actions = np.array([action_encoder.transform(a) for a in opponent_batch[SampleBatch.ACTIONS]]) # Unbounded
-        opponent_actions = np.array([action_encoder.transform(
-            np.clip(a, -1, 1)) for a in opponent_batch[SampleBatch.ACTIONS]])  # Bounded
-        to_update[:, -ACTION_VEC_SIZE:] = opponent_actions
-
-# class ModelEvaluationCallback(DefaultCallbacks):
-#     # def __init__(self):
-#         # self.logger =
-
-
-############################################################
-def central_critic_observer(agent_obs, **kw):
-    new_obs = {
-        0: {
-            "own_obs": agent_obs[0],
-            "opponent_obs": agent_obs[1],
-            # Filled in by FillInActions
-            "opponent_action": np.zeros(ACTION_VEC_SIZE),
-        },
-        1: {
-            "own_obs": agent_obs[1],
-            "opponent_obs": agent_obs[0],
-            # Filled in by FillInActions
-            "opponent_action": np.zeros(ACTION_VEC_SIZE),
-        },
-    }
-    return new_obs
-
 
 def configure_constants(ARGS):
-    global OWN_OBS_VEC_SIZE, ACTION_VEC_SIZE
     if ARGS.obs == ObservationType.KIN:
         OWN_OBS_VEC_SIZE = 12
     elif ARGS.obs == ObservationType.RGB:
@@ -123,3 +86,4 @@ def configure_constants(ARGS):
     else:
         print("[ERROR] unknown ActionType")
         exit()
+    return (OWN_OBS_VEC_SIZE, ACTION_VEC_SIZE)
