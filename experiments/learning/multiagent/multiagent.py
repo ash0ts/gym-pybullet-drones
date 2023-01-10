@@ -47,6 +47,7 @@ from ray.rllib.algorithms.algorithm_config import AlgorithmConfig
 from gym.spaces import Box, Dict
 from ray.rllib.algorithms.callbacks import DefaultCallbacks
 from ray.rllib.policy.sample_batch import SampleBatch
+from ray.tune.search.optuna import OptunaSearch # 🕵🏽
 
 from ray.air.integrations.wandb import WandbLoggerCallback  # 🪄🐝
 import wandb
@@ -59,7 +60,6 @@ from gym_pybullet_drones.utils.Logger import Logger
 from utils import video_recordings_to_wandb_table, configure_and_create_folders
 from model import CustomTorchCentralizedCriticModel, configure_constants
 from env_manager import create_env
-
 import multiprocessing
 
 SEED = 1
@@ -179,31 +179,29 @@ if __name__ == "__main__":
     
     #TODO: Make arguments
     algorithm = "PPO"
-    train_batch_size = 128
-    num_gpus = 2
-    #TODO: Gets stuck on PENDING if resource starved
-    num_rollout_workers = 1
-    num_gpus_per_worker = 1
-    num_cpus_per_worker = (num_cpus//num_rollout_workers) - 1
+    num_gpus = 1 #you only need one unless you have REALLY large train
+    #TODO try fractional GPUs and then increase the amount of rollout workers
+    num_rollout_workers = 3 #cpu cores utilized for sampling parallely
+    num_gpus_per_worker = 0 #you only really need to adjust this for extremely large models that don't fit conventially
+    num_cpus_per_worker = ((num_cpus-1)//num_rollout_workers) - 1
+    
+    #Hyperparameters we want to search over
+    #TODO: Find out which parameters work better for this
+    train_batch_size = tune.quniform(512, 4096, 256)
+    gamma = tune.quniform(0.9, 0.99, 0.01)
+    lr = tune.loguniform(1e-4, 1e-2)
     
     
-    print(f"""
-    {num_cpus}
-    {num_gpus}
-    {num_rollout_workers}
-    {num_gpus_per_worker}
-    {num_cpus_per_worker}
-    """
-    )
 
-    
+    #https://github.com/ray-project/ray/blob/53f68cd4d6b36965dddf9409015cba8ba313da2f/rllib/algorithms/algorithm_config.py#L941
     config = (
         AlgorithmConfig(algo_class=algorithm)
         .environment(temp_env_name)
         .framework("torch")
         .training(
             train_batch_size=train_batch_size,
-            # gamma=0.9,
+            gamma=gamma,
+            lr=lr,
             model={
                 "custom_model": "cc_model",
                 "custom_model_config": {
@@ -241,6 +239,9 @@ if __name__ == "__main__":
         
     )
     print(f"Created {algorithm} config")
+    import pprint
+    pprint.pprint(config.to_dict())
+    
     #### Tuner Callbacks #######################################
     tuner_callbacks = [
         WandbLoggerCallback(project=f"{PROJECT_NAME}-trials",
@@ -259,18 +260,32 @@ if __name__ == "__main__":
     
     #### Ray Tune stopping conditions ##########################
     stop = CombinedStopper(
-        MaximumIterationStopper(max_iter=500),
+        MaximumIterationStopper(max_iter=50),
         TrialPlateauStopper(metric="episode_reward_mean")
     )
+    n_search_attempts = 10
+    
+    #### Hyperparameter search algorithm #######################
+    optuna_search = OptunaSearch()
     
     #### Train #################################################
     #TODO: Add a tunable parameter on SEED
     model_tuner = tune.Tuner(
-        algorithm, param_space=config, run_config=air.RunConfig(
-            verbose=3, local_dir=filename,
+        algorithm,
+        tune_config=tune.TuneConfig(
+            metric="episode_reward_mean",
+            mode="min",
+            search_alg=optuna_search, # 🕵🏽 How we want to search.
+            num_samples=n_search_attempts,
+        ),
+        param_space=config,
+        run_config=air.RunConfig(
+            verbose=3,
+            local_dir=filename,
             stop=stop,
             callbacks=tuner_callbacks,
-            checkpoint_config=checkpoint_config)
+            checkpoint_config=checkpoint_config
+        )
     )
     print("Created model tuner")
 
@@ -293,16 +308,14 @@ if __name__ == "__main__":
     best_model_artifact.add(training_video_table, "training_videos")
     
     results = results_grid._experiment_analysis #TODO: Perform this logic directly with the tuner.ResultGrid as opposed to ExperimentAnalysis
-    checkpoints = results.get_trial_checkpoints_paths(trial=results.get_best_trial('episode_reward_mean',
-                                                                                   mode='max'
-                                                                                   ),
-                                                      metric='episode_reward_mean'
-                                                      )
-    best_checkpoint_path = checkpoints[0][0]
+    best_trial = results.get_best_trial('episode_reward_mean', mode='max')
+    best_trial_config = best_trial.config
+    best_checkpoints = results.get_trial_checkpoints_paths(trial=best_trial, metric='episode_reward_mean')
+    best_checkpoint_path = best_checkpoints[0][0]
     best_model_artifact.add_dir(best_checkpoint_path, name="model")
 
     #### Run best model in test environment ####################
-    agent = ppo.PPOTrainer(config=config)
+    agent = ppo.PPOTrainer(config=best_trial_config)
     agent.restore(best_checkpoint_path)
     print(f"Restored best model from {best_checkpoint_path}")
 
